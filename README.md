@@ -7,7 +7,18 @@ Unix.
 
 It is best used with `watch(1)`  for continuous updates. You also need a wide screen (or a small font).
 
-<em>Tested on: Fedora 17 and Red Hat Linux 5 and 4.</em>
+<em>Tested on: Fedora 17 and Red Hat Linux 6 and 5</em>
+
+Change log
+----------
+
+2013-02-12 : Correctly handle "netstat --wide", which may or may not work depending on the system.
+             Correctly parse netstat output with IPv6 addresses.
+
+TODO
+----
+
+IO::Interface::Simple doesn't grok IPv6 addresses. Replace with a scrape of /proc
 
 Sample output
 -------------
