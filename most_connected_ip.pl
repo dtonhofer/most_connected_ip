@@ -1,13 +1,23 @@
 #!/usr/bin/perl -w
 
 ################################################################################
-# Extremely simple script to process (Linux) netstat output to show 
-# "most connected IPs"
+# Extremely simple script to process (Linux) netstat output to show the 
+# established TCP connections and their state on the local machine, grouped by
+# endpoint (IP:port).
 #
-# Best used with "watch" for continual updates.
+# Hosted at GitHub: https://github.com/dtonhofer/most_connected_ip.git
+#
+# Best used with "watch" for continual updates, like this:
+#
+#   watch -n 1 "perl most_connected_ip.pl 2>/dev/null"
+#
+# The above suppresses error messages and makes "watch" run the script
+# every second. Of course a simple
+#
+#   watch most_connected_ip.pl 
+#
+# should work too.
 ################################################################################
-# Maintainer: d.tonhofer@m-plify.com
-#
 # Copyright 2012 M-PLIFY S.A.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
@@ -152,71 +162,94 @@ exit 0;
 
 
 # -----------------------------------------------------------------------------
-# Line parsing; write to STDERR if this fails
-# Line contents are:
-# "receivq, sendq, local address (IPv4:PORT, ::ffff:IPv4:PORT, IPv6), foreign address (IPv4:PORT, ::ffff:IPv4:PORT, IPv6), state"
+# netstat line parsing; write to STDERR if this fails.
+# On a single netstat line describing a connection, one finds:
+#   protocol        - may be "tcp" or "tcp6"
+#   receivq         - a positive integer
+#   sendq           - a positive integer
+#   local address   - may be "IPv4:PORT", "::ffff:IPv4:PORT", "IPv6:PORT"
+#   foreign address - may be "IPv4:PORT", "::ffff:IPv4:PORT", "IPv6:PORT"
+#   TCP state       - a known string
+# On a single netstat line describing a server socket, one finds:
+#   protocol        - may be "tcp" or "tcp6"
+#   "0"
+#   "0"
+#   local address   - may be "IPv4:PORT", "::ffff:IPv4:PORT", "IPv6:PORT"
+#   foreign address - "0.0.0.0:*", ":::*" 
+#   "LISTEN"
 # -----------------------------------------------------------------------------
 
 sub analyzeNetstatLine {
    my ($line,$allConnections,$allListeners,$debug) = @_;
-   my $localIpTxt;
-   my $localPort;
-   my $remoteIpTxt;
-   my $remotePort;
-   my $state;
-   my $isConnection = 0;
-   if ($line =~ /^tcp\s+\d+\s+\d+\s+(::ffff:)?(\d+\.\d+\.\d+\.\d+):(\d+)\s+(::ffff:)?(\d+\.\d+\.\d+\.\d+):(\d+)\s+(\S+?)\s*$/) {
-      $localIpTxt   = $2;
-      $localPort    = $3 * 1;
-      $remoteIpTxt  = $5;
-      $remotePort   = $6 * 1;
-      $state        = $7;
-      $isConnection = 1
-   }
-   elsif ($line =~ /^tcp(6)?\s+\d+\s+\d+\s+([0-9abcdef:]+?):(\d+)\s+([0-9abcdef:]+?):(\d+)\s+(\S+?)\s*$/) {
-      $localIpTxt   = $2; 
-      $localPort    = $3 * 1;
-      $remoteIpTxt  = $4;
-      $remotePort   = $5 * 1;
-      $state        = $6;
-      $isConnection = 1
+   #
+   # Try to recognize a "connection" line
+   #
+   {
+      my ($localIpTxt,$localPort,$remoteIpTxt,$remotePort,$state,$isConnection);
+      $isConnection = 0;
+      if ($line =~ /^(tcp|tcp6)\s+\d+\s+\d+\s+(::ffff:)?(\d+\.\d+\.\d+\.\d+):(\d+)\s+(::ffff:)?(\d+\.\d+\.\d+\.\d+):(\d+)\s+(\S+?)\s*$/) {
+         $localIpTxt   = $3;
+         $localPort    = $4 * 1;
+         $remoteIpTxt  = $6;
+         $remotePort   = $7 * 1;
+         $state        = $8;
+         $isConnection = 1
+      }
+      elsif ($line =~ /^(tcp|tcp6)\s+\d+\s+\d+\s+([0-9abcdef:]+?):(\d+)\s+([0-9abcdef:]+?):(\d+)\s+(\S+?)\s*$/) {
+         $localIpTxt   = $2; 
+         $localPort    = $3 * 1;
+         $remoteIpTxt  = $4;
+         $remotePort   = $5 * 1;
+         $state        = $6;
+         $isConnection = 1
+      }
+      # If a connection was indeed recognized, process and we are done
+      if ($isConnection) {
+         my $localIp  = new Net::IP($localIpTxt); 
+         die "Could not transform local IP '$localIpTxt'\n" unless $localIp;
+         my $remoteIp = new Net::IP($remoteIpTxt);
+         die "Could not transform remote IP '$remoteIpTxt'\n" unless $remoteIp;
+         my $key      = "[" . $localIp->ip . "][$localPort][" . $remoteIp->ip . "][$remotePort]";
+         die "There already is an entry registered under '$key'" if exists $$allConnections{$key};
+         $$allConnections{$key} = { localIp    => $localIp, 
+                                    localPort  => $localPort,
+                                    remoteIp   => $remoteIp,
+                                    remotePort => $remotePort,
+                                    state      => $state };
+         return # --> OUTTA HERE
+      }
    }
    #
-   # If a connection was recognized, we are done
+   # Otherwise, try to recognize a "listening socket" line
    #
-   if ($isConnection) {
-      my $localIp  = new Net::IP($localIpTxt); 
-      die "Could not transform local IP '$localIpTxt'\n" unless $localIp;
-      my $remoteIp = new Net::IP($remoteIpTxt);
-      die "Could not transform remote IP '$remoteIpTxt'\n" unless $remoteIp;
-      my $key      = "[" . $localIp->ip . "][$localPort][" . $remoteIp->ip . "][$remotePort]";
-      die "There already is an entry registered under '$key'" if exists $$allConnections{$key};
-      $$allConnections{$key} = { localIp    => $localIp, 
-                                 localPort  => $localPort,
-                                 remoteIp   => $remoteIp,
-                                 remotePort => $remotePort,
-                                 state      => $state }      
-   }
-   else {
-      if ($line =~ /^tcp\s+0\s+0\s+(::ffff:)?(\d+\.\d+\.\d+\.\d+):(\d+)\s+(0\.0\.0\.0:\*|:::\*)\s+LISTEN\s*$/ ||
-          $line =~ /^tcp(6)?\s+0\s+0\s+([0-9abcdef:]+?):(\d+)\s+:::\*\s+LISTEN\s*$/) {
-
-         my $localIp;
-         my $localPort  = $3 * 1;
-         my $key;
-
-         if ($2 eq '0.0.0.0') {
+   {
+      my ($localIpRaw,$localPort,$isListen);
+      $isListen = 0;
+      if ($line =~ /^(tcp|tcp6)\s+0\s+0\s+(::ffff:)?(\d+\.\d+\.\d+\.\d+):(\d+)\s+(0\.0\.0\.0:\*|:::\*)\s+LISTEN\s*$/) {
+         $localIpRaw = $3;
+         $localPort  = $4 * 1;
+         $isListen   = 1;
+      }
+      elsif ($line =~ /^(tcp|tcp6)\s+0\s+0\s+([0-9abcdef:]+?):(\d+)\s+:::\*\s+LISTEN\s*$/) {
+         $localIpRaw = $2;
+         $localPort  = $3 * 1;
+         $isListen   = 1;
+      }
+      # If a "listening socket" was indeed recognized, process and we are done
+      if ($isListen) {
+         my ($key,$localIp);
+         if ($localIpRaw eq '0.0.0.0') {
+            # "Listen on any IP address" -> $localIp = undef
             # Net:IP cannot deal with that representation
             # even "Net::IP('0.0.0.0/8')" is considered a *private* address, but it should not be
             $localIp = undef
          }
          else {
-            $localIp = new Net::IP($2); 
-            die "Could not transform local IP '$2'\n" unless $localIp;
+            $localIp = new Net::IP($localIpRaw); 
+            die "Could not transform local IP '$localIpRaw'\n" unless $localIp;
             # print STDERR $2 . " ---> " . $localIp->ip . "  " . $localIp->iptype() . "\n";
          }
-
-         if (!defined $localIp || $localIp->iptype() eq "UNSPECIFIED") {
+         if (!defined $localIp || $localIp->iptype eq "UNSPECIFIED") {
             $key     = "[][$localPort]";
             $localIp = undef
             # the unspecified address may appear twice; for IPv6 and IPv4
@@ -225,15 +258,18 @@ sub analyzeNetstatLine {
             $key  = "[" . $localIp->ip . "][$localPort]";
             die "The key '$key' has already been seen!\n" if exists $$allListeners{$key};
          }
-         $$allListeners{$key} = { localIp    => $localIp,
-                                  localPort  => $localPort }
+         $$allListeners{$key} = { localIp => $localIp, localPort => $localPort };
+         return # --> OUTTA HERE
       }
-      elsif ($line =~ /^Activ/ || $line =~ /^Proto/) {
-         # NOP
-      }
-      else {
-         print STDERR "Unmatched: '$line'\n";
-      }
+   }
+   #
+   # Otherwise either ignore the line or warn
+   #
+   if ($line =~ /^Activ/ || $line =~ /^Proto/) {
+      # NOP
+   }
+   else {
+      print STDERR "Unmatched: '$line'\n";
    }
 }
  
@@ -709,15 +745,43 @@ sub sortByState {
 
 sub obtainLocalIpAddresses {
    my ($debug) = @_;
-   my $res = {};
-   my @ifarray = IO::Interface::Simple->interfaces; # does not collect IPv6 addresses on Fedora 17 :-(
-   for my $if (@ifarray) {
-      if ($if->address) {
-         my $ip = new Net::IP($if->address); 
-         die "Could not transform the address " . $if->address . " of interface '$if' into a Net::IP\n" unless $ip;
-         $$res{$ip->ip()} = $ip;
-         if ($debug) { 
-            print STDERR "Interface '$if' with address '" . $if->address . "' registered with IP address string '" . $ip->ip . "'\n";
+   my $res = {}; # map which maps an IP string representation to a Net::IP object
+   #
+   # IO::Interface::Simple only collects IPv4 interface addresses; currently there 
+   # is no practical listing under /proc for these; I suppose it uses 
+   # getifaddrs(3)
+   #
+   {
+      my @ifarray = IO::Interface::Simple->interfaces;
+      for my $if (@ifarray) {
+         if ($if->address) {
+            my $ip = new Net::IP($if->address); 
+            die "Could not transform the address " . $if->address . " of interface '$if' into a Net::IP\n" unless $ip;
+            $$res{$ip->ip} = $ip;
+            if ($debug) { 
+               print STDERR "Interface '$if' with address '" . $if->address . "' registered with IP address string '" . $ip->ip . "'\n";
+            }
+         }
+      }
+   }
+   #
+   # IPv6 addresses can be gotten from /proc; this includes the loopback address
+   #  
+   my $procfile = "/proc/net/if_inet6";
+   if (-f $procfile) {
+      open(my $fh,"<$procfile") or die "Could not open file '$procfile': $!\n";
+      my @if6array = <$fh>;
+      close($fh);
+      for my $line (@if6array) {
+         if ($line =~ /^([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})\s+(\w\w)\s+(\w\w)\s+(\w\w)\s+(\w\w)\s+(\w+)/) {
+            my $rawIp = "$1:$2:$3:$4:$5:$6:$7:$8";
+            my $if    = $13;
+            my $ip = new Net::IP($rawIp); 
+            die "Could not transform the address " . $rawIp . " of interface '$if' into a Net::IP\n" unless $ip;
+            $$res{$ip->ip} = $ip;
+            if ($debug) { 
+               print STDERR "Interface '$if' registered with IP address string '" . $ip->ip . "'\n";
+            }
          }
       }
    }
