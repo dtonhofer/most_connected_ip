@@ -34,14 +34,16 @@
 ################################################################################
 
 use strict;
+use List::Util qw[min max];
 use Net::DNS::Resolver;    # http://search.cpan.org/~nlnetlabs/Net-DNS-0.72/lib/Net/DNS/Resolver.pm
 use Net::IP qw(:PROC);     # http://search.cpan.org/dist/Net-IP/IP.pm
 use IO::Interface::Simple; # http://search.cpan.org/~lds/IO-Interface/Interface/Simple.pm 
                            # Run: yum install  perl-Net-DNS.i686  perl-Net-IP   perl-IO-Interface
 
 
-my $debug = 0;          # Set to 1 for debugging output to STDERR
-my $dnsNameLen = 50;    # Determines the size of the hostname printed to STDOUT
+my $debug      = 0;        # Set to 1 for debugging output to STDERR
+my $dnsNameLen = 50;       # Determines the size of the hostname printed to STDOUT
+my $portSep    = "/";      # How to separate IP address and port (traditionally ":", but that is confusing)
 
 # ----
 # Obtain IP addresses assigned to local interfaces as a set. The set is implemented as a hash
@@ -135,30 +137,50 @@ if ($debug) {
 }
 
 # ----
-# Result generation: Group and print
+# Result generation: Group and print; the data is analyzed fully before printing in 
+# order to establish the width of the "local endpoint" and "remote endpoint" fields
 # ----
 
+my $connCountMap     = {}; # map direction to number of connections
+my $groupByMap       = {}; # map direction to a hash which maps grouping key to a value-holding hash
+my $loopConnCount;         # number of looping connections
+my $dupLoopConnCount;      # number of looping connections shown twice by netstat (one of the lines is thrown away)
+my $loopGroupBy;           # hash which maps grouping key to a value-holding hash
+my $maxLocalEpWidth  = 0;  # how large shall "local endpoint" field be
+my $maxRemoteEpWidth = 0;  # how large shall "remote endpoint" field be
+
 for my $direction ('inbound', 'outbound') {
-   my $res       = groupDistantConnections($allConnections,$direction,$reverseIpMap,$dnsResolver);
-   my $groupBy   = $$res[0];
-   my $connCount = $$res[1];
-   print "Distant $direction connections: $connCount\n";
-   printDistantConnections($groupBy,$direction,$dnsNameLen)
+   my $res = groupDistantConnections($allConnections,$direction,$reverseIpMap,$dnsResolver);
+   $$groupByMap{$direction}   = $$res{groupBy};
+   $$connCountMap{$direction} = $$res{connCount};
+   $maxLocalEpWidth           = max($maxLocalEpWidth, $$res{maxLocalEpWidth});
+   $maxRemoteEpWidth          = max($maxRemoteEpWidth,$$res{maxRemoteEpWidth});
 }
 
 {
-   my $res          = groupLoopingConnections($allConnections,$reverseIpMap,$dnsResolver);
-   my $groupBy      = $$res[0];
-   my $connCount    = $$res[1];
-   my $dupConnCount = $$res[2];
-   print "Looping connections: $connCount ($dupConnCount duplicates)\n";
-   printLocalConnections($groupBy,$dnsNameLen)
+   my $res = groupLoopingConnections($allConnections,$reverseIpMap,$dnsResolver);
+   $loopConnCount     = $$res{loopConnCount};
+   $dupLoopConnCount  = $$res{dupLoopConnCount};
+   $loopGroupBy       = $$res{loopGroupBy};
+   $maxLocalEpWidth   = max($maxLocalEpWidth, $$res{maxLocalEpWidth});
+   $maxRemoteEpWidth  = max($maxRemoteEpWidth,$$res{maxRemoteEpWidth});
+}
+
+for my $direction ('inbound', 'outbound') {
+   if ($$connCountMap{$direction} > 0) {
+      print "Distant $direction connections: " . $$connCountMap{$direction} . "\n";
+      printDistantConnections($$groupByMap{$direction},$direction,$maxLocalEpWidth,$maxRemoteEpWidth)
+   }
+}
+
+if ($loopConnCount > 0) {
+   print "Looping connections: $loopConnCount";
+   print " ($dupLoopConnCount duplicate lines skipped)" if $dupLoopConnCount;
+   print "\n";
+   printLoopingConnections($loopGroupBy,$maxLocalEpWidth,$maxRemoteEpWidth);
 }
 
 exit 0;
-
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -282,8 +304,8 @@ sub determineType {
    my($desc) = @_;
    my $localIp    = $$desc{localIp};
    my $remoteIp   = $$desc{remoteIp};
-   my $localType  = $localIp->iptype();
-   my $remoteType = $remoteIp->iptype();
+   my $localType  = $localIp->iptype;
+   my $remoteType = $remoteIp->iptype;
    if ($localType eq "LOOPBACK" && $remoteType eq "LOOPBACK") {
       $$desc{type} = "looping"
    }
@@ -455,7 +477,7 @@ sub findReverse {
    #
    my $type = $ip->iptype();
    # print "Type of " . $ip->ip() . ": $type\n";   
-   return '' if ($type ne 'PUBLIC');
+   # return '' if ($type ne 'PUBLIC');
    #
    # Look in program-local cache first
    #
@@ -498,41 +520,66 @@ sub findReverse {
 
 # -----------------------------------------------------------------------------
 # Group the distant connections, basically doing a manual SQL GROUP BY
+# Only considers connections matching "reqDirection", i.e. either 'outbound'
+# or 'inbound' ones.
+#
+# Returns a hash with:
+#
+# At "groupBy"   : A hash which maps a string (the grouping key) to another 
+#                  hash listing "local endpoint", "remote endpoint", "states"
+#                  number of connection grouped, reverse DNS name and the
+#                  grouping key itself
+#
+# At "connCount" : Number of connections found in total
+#
+# At "maxLocalEpWidth"  : the largest string width found for the "local endpoint"
+#
+# At "maxRemoteEpWidth" : the largest string width found for the "remote endpoint"
 # -----------------------------------------------------------------------------
 
 sub groupDistantConnections {
-   my ($allConnections,$sollDirection,$reverseIpMap,$dnsResolver) = @_;
+   my ($allConnections,$reqDirection,$reverseIpMap,$dnsResolver) = @_;
    my $groupBy   = {};
    my $connCount = 0;
+   my $maxLocalEpWidth  = 0;
+   my $maxRemoteEpWidth = 0;
    for my $desc (values %$allConnections) {
       my ($localIp,$localPort,$remoteIp,$remotePort,$state,$direction,$type) = unpackDesc($desc);
-      next if (($type ne 'distant') || ($direction ne $sollDirection));
+      next if (($type ne 'distant') || ($direction ne $reqDirection));
       $connCount++;
       my $newKey;
-      if ($sollDirection eq 'outbound') {
+      if ($reqDirection eq 'outbound') {
          # Group by remote endpoint and by local IP (basically a manual GROUP BY)
-         $newKey = $remoteIp->ip . "," . $remotePort . "," . $localIp;
-         # create the grouping record if it doesn't exist yet
+         $newKey = $remoteIp->ip . "," . $remotePort . "," . $localIp->ip;
+         # Create the grouping record if it doesn't exist yet
          if (!exists $$groupBy{$newKey}) {
+            my $localEp  = $localIp->short;
+            my $remoteEp = $remoteIp->short . $portSep . $remotePort;
+            $maxLocalEpWidth  = max($maxLocalEpWidth,  length($localEp));
+            $maxRemoteEpWidth = max($maxRemoteEpWidth, length($remoteEp));
             $$groupBy{$newKey} = { 
-               localEp       => $localIp->ip,
-               remoteEp      => $remoteIp->ip . ":" . $remotePort,
-               stateSubHash  => { }, # this will contain the state counters
+               localEp       => $localEp,
+               remoteEp      => $remoteEp,
+               stateSubHash  => { }, # this will contain the state counters, filled by registerState() below
                count         => 0,
                dnsName       => findReverse($remoteIp,$reverseIpMap,$dnsResolver),
                key           => $newKey
             }
          }
       }
-      elsif ($sollDirection eq 'inbound') {
+      elsif ($reqDirection eq 'inbound') {
          # Group by local endpoint and by remote IP (basically a manual GROUP BY)
-         $newKey = $localIp->ip . "," . $localPort . "," . $remoteIp;
-         # create the grouping record if it doesn't exist yet
+         $newKey = $localIp->ip . "," . $localPort . "," . $remoteIp->ip;
+         # Create the grouping record if it doesn't exist yet
+         my $localEp  = $localIp->short . $portSep . $localPort;
+         my $remoteEp = $remoteIp->short;
+         $maxLocalEpWidth  = max($maxLocalEpWidth,  length($localEp));
+         $maxRemoteEpWidth = max($maxRemoteEpWidth, length($remoteEp));
          if (!exists $$groupBy{$newKey}) {
             $$groupBy{$newKey} = { 
-               localEp       => $localIp->ip . ":" . $localPort,
-               remoteEp      => $remoteIp->ip,
-               stateSubHash  => { }, # this will contain the state counters
+               localEp       => $localEp,
+               remoteEp      => $remoteEp,
+               stateSubHash  => { }, # this will contain the state counters, filled by registerState() below
                count         => 0,
                dnsName       => findReverse($remoteIp,$reverseIpMap,$dnsResolver),
                key           => $newKey
@@ -540,14 +587,15 @@ sub groupDistantConnections {
          }
       }
       else {
-         die "Unknown direction '$sollDirection'\n"
+         die "Unknown direction '$reqDirection'\n"
       }
       # retrieve the grouping record which must exist now and increment counters
       my $gDesc = $$groupBy{$newKey};
       $$gDesc{count}++;
       registerState($$gDesc{stateSubHash},$state)
    }
-   return [ $groupBy, $connCount ]
+   return { groupBy => $groupBy, connCount => $connCount, 
+            maxLocalEpWidth => $maxLocalEpWidth, maxRemoteEpWidth => $maxRemoteEpWidth }
 }
 
 # -----------------------------------------------------------------------------
@@ -556,9 +604,11 @@ sub groupDistantConnections {
 
 sub groupLoopingConnections {
    my ($allConnections,$reverseIpMap,$dnsResolver) = @_;
-   my $groupBy   = {};
-   my $connCount = 0;
-   my $dupConnCount = 0;
+   my $groupBy          = {};
+   my $connCount        = 0;
+   my $dupConnCount     = 0;
+   my $maxLocalEpWidth  = 0;
+   my $maxRemoteEpWidth = 0;
    for my $desc (values %$allConnections) {
       my ($localIp,$localPort,$remoteIp,$remotePort,$state,$direction,$type) = unpackDesc($desc);
       next if $type ne 'looping';
@@ -570,13 +620,17 @@ sub groupLoopingConnections {
       my $newKey;
       if ($direction eq 'outbound') {
          # Group by remote endpoint and by local IP
-         # (do we need to group by IP? Maybe, if there are IPv4 and IPv6 connections)
-         $newKey = $remoteIp->ip . "," . $remotePort . "," . $localIp;
+         $newKey = $remoteIp->ip . "," . $remotePort . "," . $localIp->ip;
          if (!exists $$groupBy{$newKey}) {
+            # Create the grouping record if it doesn't exist yet
+            my $localEp  = $localIp->short;
+            my $remoteEp = $remoteIp->short . $portSep . $remotePort;
+            $maxLocalEpWidth  = max($maxLocalEpWidth,  length($localEp));
+            $maxRemoteEpWidth = max($maxRemoteEpWidth, length($remoteEp));
             $$groupBy{$newKey} = { 
-               localEp       => $localIp->ip,
-               remoteEp      => $remoteIp->ip . ":" . $remotePort,
-               stateSubHash  => { },
+               localEp       => $localEp,
+               remoteEp      => $remoteEp,
+               stateSubHash  => { }, # this will contain the state counters, filled by registerState() below
                count         => 0,
                key           => $newKey
             }
@@ -584,12 +638,17 @@ sub groupLoopingConnections {
       }
       elsif ($direction eq 'inbound') {
          # Reverse this entry...
-         $newKey = $localIp->ip . "," . $localPort . "," . $remoteIp;
+         $newKey = $localIp->ip . "," . $localPort . "," . $remoteIp->ip;
          if (!exists $$groupBy{$newKey}) {
+            # Create the grouping record if it doesn't exist yet
+            my $localEp  = $remoteIp->short;
+            my $remoteEp = $localIp->short . $portSep . $localPort;
+            $maxLocalEpWidth  = max($maxLocalEpWidth,  length($localEp));
+            $maxRemoteEpWidth = max($maxRemoteEpWidth, length($remoteEp));
             $$groupBy{$newKey} = { 
-               localEp       => $remoteIp->ip,
-               remoteEp      => $localIp->ip . ":" . $localPort,
-               stateSubHash  => { },
+               localEp       => $localEp,
+               remoteEp      => $remoteEp,
+               stateSubHash  => { }, # this will contain the state counters, filled by registerState() below
                count         => 0,
                key           => $newKey
             }
@@ -602,7 +661,8 @@ sub groupLoopingConnections {
       $$gDesc{count}++;
       registerState($$gDesc{stateSubHash},$state)
    }
-   return [ $groupBy, $connCount, $dupConnCount ]
+   return { loopGroupBy => $groupBy, loopConnCount => $connCount, dupLoopConnCount => $dupConnCount, 
+            maxLocalEpWidth => $maxLocalEpWidth, maxRemoteEpWidth => $maxRemoteEpWidth }
 }
 
 # -----------------------------------------------------------------------------
@@ -638,66 +698,73 @@ sub registerState {
 # -----------------------------------------------------------------------------
 
 sub printDistantConnections {
-   my($groupBy,$direction,$dnsNameLen) = @_;
-   my @list = reverse (sort sortByCountThenKey (values %$groupBy));
-   my $arrow;
-   if ($direction eq 'outbound') {
-      $arrow = "-->"
-   }
-   else {
-      $arrow = "<--"
-   }
-   for my $gDesc (@list) {
+   my($groupBy,$direction,$maxLocalEpWdith,$maxRemoteEpWidth) = @_;
+   my $arrowMap  = { outbound => "-->", inbound => "<--" };
+   my $arrow     = $$arrowMap{$direction};
+   my $maxLocal  = $maxLocalEpWidth  + 1;
+   my $maxRemote = $maxRemoteEpWidth + 1;
+   my @gDescList = reverse (sort sortByCountThenKey (values %$groupBy));
+   my $format    = buildFormatString($maxLocalEpWidth,$maxRemoteEpWidth);
+   for my $gDesc (@gDescList) {
       my $localEp  = $$gDesc{localEp}; 
       my $remoteEp = $$gDesc{remoteEp};
       my $count    = $$gDesc{count};
-      my $dnsName  = '';
-      $dnsName  = $$gDesc{dnsName};
-      {
-         if (!$dnsName) {
-            $dnsName = ''
-         }
-         else {
-            if (length($dnsName) > $dnsNameLen) {
-               $dnsName = substr($dnsName, $dnsNameLen)
-            }
-         }      
+      my $dnsName  = $$gDesc{dnsName};
+      if (!$dnsName) {
+         $dnsName = ''
       }
-      my $stateText = ''; 
-      {
-         my $addComma = '';
-         my $stateSubHash = $$gDesc{stateSubHash};
-         for my $state (sort sortByState keys %$stateSubHash) {
-            $stateText = $stateText . $addComma . $$stateSubHash{$state} . " x " . $state;
-            $addComma = ", ";
+      else {
+         if (length($dnsName) > $dnsNameLen) {
+            $dnsName = substr($dnsName, $dnsNameLen)
          }
-      }
-      print sprintf("   %-30s %3s %-30s : %4d        %-${dnsNameLen}s %s\n", $localEp, $arrow, $remoteEp, $count, $dnsName, $stateText);
+      }      
+      my $stateText = buildStateText($$gDesc{stateSubHash});
+      print sprintf($format, $localEp, $arrow, $remoteEp, $count, $dnsName, $stateText);
    }
 }
 
 # -----------------------------------------------------------------------------
-# Printer for "local" connections
+# Printer for "looping" connections
 # -----------------------------------------------------------------------------
 
-sub printLocalConnections {
-   my($groupBy,$dnsNameLen) = @_;
-   my @list = reverse (sort sortByCountThenKey (values %$groupBy));
-   for my $gDesc (@list) {
-      my $localEp  = $$gDesc{localEp}; 
-      my $remoteEp = $$gDesc{remoteEp};
-      my $count    = $$gDesc{count};
-      my $stateText = ''; 
-      {
-         my $addComma = '';
-         my $stateSubHash = $$gDesc{stateSubHash};
-         for my $state (sort sortByState keys %$stateSubHash) {
-            $stateText = $stateText . $addComma . $$stateSubHash{$state} . " x " . $state;
-            $addComma = ", ";
-         }
-      }
-      print sprintf("   %-30s %3s %-30s : %4d        %-${dnsNameLen}s %s\n", $localEp, "-->", $remoteEp, $count, '', $stateText);
+sub printLoopingConnections {
+   my($groupBy,$maxLocalEpWidth,$maxRemoteEpWidth) = @_;
+   my @gDescList = reverse (sort sortByCountThenKey (values %$groupBy));
+   my $format    = buildFormatString($maxLocalEpWidth,$maxRemoteEpWidth);
+   for my $gDesc (@gDescList) {
+      my $localEp   = $$gDesc{localEp}; 
+      my $remoteEp  = $$gDesc{remoteEp};
+      my $count     = $$gDesc{count};
+      my $stateText = buildStateText($$gDesc{stateSubHash});
+      print sprintf($format, $localEp, "-->", $remoteEp, $count, '', $stateText);
    }
+}
+
+# -----------------------------------------------------------------------------
+# Build state text
+# -----------------------------------------------------------------------------
+
+sub buildStateText {
+   my($stateSubHash) = @_;
+   my $text = '';
+   my $addComma = '';
+   for my $state (sort sortByState keys %$stateSubHash) {
+       $text = $text . $addComma . $$stateSubHash{$state} . " x " . $state;
+       $addComma = ", ";
+   }
+   return $text 
+}
+
+# -----------------------------------------------------------------------------
+# Build format string
+# -----------------------------------------------------------------------------
+
+sub buildFormatString {
+   my($maxLocalEpWidth,$maxRemoteEpWidth) = @_;
+   my $maxLocal  = $maxLocalEpWidth  + 1;
+   my $maxRemote = $maxRemoteEpWidth + 1;
+   my $format    = "   %-${maxLocal}s %3s %-${maxRemote}s : %4d        %-${dnsNameLen}s %s\n";
+   return $format
 }
 
 # -----------------------------------------------------------------------------
