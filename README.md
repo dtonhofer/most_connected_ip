@@ -1,13 +1,33 @@
 most_connected_ip
 =================
 
-Perl script to display the currently "most connected IPs" (actually the <em>active TCP connections</em> on
-on the local machine.) This is done by scanning the `netstat(8)` output, the script is thus meant for a
-Unix. 
+This is a Perl script to display the <em>currently active TCP connections</em> and their TCP
+state on the local machine, grouped by endpoint (IP:port), with any remote IP address resolved 
+to its reverse DNS name, if possible. 
 
-It is best used with `watch(1)`  for continuous updates. You also need a wide screen (or a small font).
+This is done by scanning the `netstat(8)` output, the script is thus meant for a Unix.
 
-<em>Tested on: Fedora 17, Red Hat Linux 6, Red Hat Linux 5</em>
+It is best used with `watch(1)` for continuous updates. You also need a wide screen (or a small font).
+
+For example, run it using:
+
+    watch -n 1 "perl most_connected_ip.pl 2>/dev/null"
+
+The above suppresses error messages and makes "watch" run the script every second. Of course a simple
+
+    watch most_connected_ip.pl 
+
+should work too.
+
+License
+-------
+
+Apache License, Version 2.0
+
+Tested on
+---------
+
+Fedora 17, Red Hat Linux 6, Red Hat Linux 5
 
 Change log
 ----------
