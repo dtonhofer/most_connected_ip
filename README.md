@@ -35,7 +35,15 @@ Change log
 <table>
 <tr>
 <td>2013-02-12</td>
-<td>Correctly handle "netstat --wide", which may or may not work depending on the system. Correctly parse netstat output with IPv6 addresses.</td>
+<td>Correctly handle "netstat --wide", which may or may not work depending on the system. 
+Correctly parse netstat output with IPv6 addresses.</td>
+</tr>
+<tr>
+<td>2013-02-28</td>
+<td>IPv4 addresses assigned to the local machine are obtained via IO::Interface::Simple. 
+Complemented this with a readout of /proc/net/if_inet6 for the IPv6 addresses.
+Netstat output parsing went wrong on Ubuntu (the IPv6 loopback is apparently shown as
+127.0.0.1); fixed. (Maybe one should not bother with netstat at all and use /proc directly)
 </tr>
 </table>
 
@@ -44,7 +52,7 @@ TODO
 
 <table>
 <tr>
-<td>IO::Interface::Simple doesn't grok IPv6 addresses yet. Replace with a scrape of /proc</td>
+<td>Output becomes fugly once IPv6 addresses show up</td>
 </tr>
 </table>
 
