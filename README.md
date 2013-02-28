@@ -43,7 +43,11 @@ Correctly parse netstat output with IPv6 addresses.</td>
 <td>IPv4 addresses assigned to the local machine are obtained via IO::Interface::Simple. 
 Complemented this with a readout of /proc/net/if_inet6 for the IPv6 addresses.
 Netstat output parsing went wrong on Ubuntu (the IPv6 loopback is apparently shown as
-127.0.0.1); fixed. (Maybe one should not bother with netstat at all and use /proc directly)
+127.0.0.1); fixed. (Maybe one should not bother with netstat at all and use /proc directly)</td>
+</tr>
+<tr>
+<td>2013-02-28</td>
+<td>Printout made nicer; fields are aligned whether IPv6 addresses show up or not.</td>
 </tr>
 </table>
 
@@ -52,7 +56,7 @@ TODO
 
 <table>
 <tr>
-<td>Output becomes fugly once IPv6 addresses show up</td>
+<td>When the reverse DNS lookup fails, one should traceroute to find the last IP that reverse-resolves</td>
 </tr>
 </table>
 
