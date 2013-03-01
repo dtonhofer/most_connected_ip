@@ -50,7 +50,7 @@ my $portSep    = "/";      # How to separate IP address and port (traditionally 
 # which maps "IP address as string" --> Net::IP instance. This includes the loopback address.
 # ----
 
-my $localIpAddresses = obtainLocalIpAddresses($debug);
+my $localIpAddresses = obtainLocalIpAddresses();
 
 # ----
 # For querying DNS names: a local cache and the resolver itself (not sure the local cache
@@ -92,7 +92,7 @@ my $allListeners   = {}; # information about TCP sockets (listeners) as hash, ke
 
 foreach my $line (@lines) {
    chomp $line;
-   analyzeNetstatLine($line, $allConnections, $allListeners, $debug)
+   analyzeNetstatLine($line, $allConnections, $allListeners)
 }
 
 if ($debug) {
@@ -124,7 +124,7 @@ foreach my $key (keys %$allConnections) {
    # direction == "outbound"   a connection for which the "remote endpoint" is the server side
    # direction == "duplicate"  a connection with type == "looping" which is the symmetric representation of another one
    #
-   determineDirection($allListeners,$allConnections,$localIpAddresses,$desc,$debug) 
+   determineDirection($allListeners,$allConnections,$localIpAddresses,$desc) 
 }
 
 if ($debug) {
@@ -202,7 +202,7 @@ exit 0;
 # -----------------------------------------------------------------------------
 
 sub analyzeNetstatLine {
-   my ($line,$allConnections,$allListeners,$debug) = @_;
+   my ($line,$allConnections,$allListeners) = @_;
    #
    # Try to recognize a "connection" line
    #
@@ -269,7 +269,7 @@ sub analyzeNetstatLine {
          else {
             $localIp = new Net::IP($localIpRaw); 
             die "Could not transform local IP '$localIpRaw'\n" unless $localIp;
-            # print STDERR $2 . " ---> " . $localIp->ip . "  " . $localIp->iptype() . "\n";
+            print STDERR "Listener address: " . $localIpRaw . " ---> " . $localIp->ip . "  " . $localIp->iptype . "\n" if $debug;
          }
          if (!defined $localIp || $localIp->iptype eq "UNSPECIFIED") {
             $key     = "[][$localPort]";
@@ -304,19 +304,43 @@ sub determineType {
    my($desc) = @_;
    my $localIp    = $$desc{localIp};
    my $remoteIp   = $$desc{remoteIp};
-   my $localType  = $localIp->iptype;
-   my $remoteType = $remoteIp->iptype;
-   if ($localType eq "LOOPBACK" && $remoteType eq "LOOPBACK") {
+   my $localType  = findType($localIp);
+   my $remoteType = findType($remoteIp);
+   print STDERR "Local IP '" . $localIp->short . "' has type '$localType'; Remote IP '" . $remoteIp->short . "' has type '$remoteType' => " if $debug;
+
+   if ($localType =~ /LOOPBACK/ && $remoteType =~ /LOOPBACK/) {
       $$desc{type} = "looping"
    }
-   elsif ($localType eq "LOOPBACK" || $remoteType eq "LOOPBACK") {
+   elsif ($localType =~ /LOOPBACK/ || $remoteType =~ /LOOPBACK/) {
       die "Found bizarre half-loopback connection $localIp -> $remoteIp\n";
    }
    else {
       $$desc{type} = "distant"
    }
+
+   print STDERR $$desc{type} . "\n" if $debug;
 }
 
+# -----------------------------------------------------------------------------
+# Find the type saturday night special
+# The documentation for Net::IP 1.26 talks about functions
+# "ip_iptypev4" and "ip_iptypev6" but these don't exist!
+# We need to use "ip_iptype" 
+# -----------------------------------------------------------------------------
+
+sub findType {
+   my($ip) = @_;
+   if ($ip->version == 4) {
+      return "V4:" . $ip->iptype
+   }
+   elsif ($ip->version == 6) {
+      return "V6:" . $ip->iptype
+   }
+   else {
+      die "Unknown IP version " . $ip->version . "\n"
+   }
+}
+ 
 # -----------------------------------------------------------------------------
 # We know whether the type of the connection is "looping" (loopback address
 # on both sides) or "distant" (something other than the loopback address on
@@ -372,7 +396,7 @@ sub determineType {
 # -----------------------------------------------------------------------------
 
 sub determineDirection {
-   my($allListeners,$allConnections,$localIpAddresses,$desc,$debug) = @_;
+   my($allListeners,$allConnections,$localIpAddresses,$desc) = @_;
    #
    # Create a key from the "local endpoint"
    #  
@@ -402,25 +426,27 @@ sub determineDirection {
    if ($$desc{type} eq 'distant') {
 
       my $remoteEpIsRemote = ! exists $$localIpAddresses{ $remoteIp->ip };
-      # print "Remote IP is remote: $remoteEpIsRemote in case of " . $remoteIp->ip . "\n";
+      
+      print STDERR "Distant connection\n" if $debug;
+      print STDERR "   Remote IP is remote: " . tf($remoteEpIsRemote) . " in case of " . $remoteIp->ip . "\n" if $debug;
 
       if ($remoteEpIsRemote) {
          if ($localEpMatchesListener) {
-            print STDERR "Deducing distant :   $localEpKey <------- $remoteEpKey\n" if $debug;
+            print STDERR "   remoteEpIsRemote &&  localEpMatchesListener => inbound  :  $localEpKey <------- $remoteEpKey\n" if $debug;
             $$desc{direction} = "inbound";
          }
          else {
-            print STDERR "Deducing distant :   $localEpKey -------> $remoteEpKey\n" if $debug;
+            print STDERR "   remoteEpIsRemote && !localEpMatchesListener => outbound :  $localEpKey -------> $remoteEpKey\n" if $debug;
             $$desc{direction} = "outbound";
          }
       }
       else {
           if ($localEpMatchesListener && !$remoteEpMatchesListener) {
-            print STDERR "Deducing distant :   $localEpKey <------- $remoteEpKey\n" if $debug;
+            print STDERR "   !remoteEpIsRemote && localEpMatchesListener && !remoteEpMatchesListener => inbound  :  $localEpKey <------- $remoteEpKey\n" if $debug;
             $$desc{direction} = "inbound";
          }
          elsif (!$localEpMatchesListener && $remoteEpMatchesListener) {
-            print STDERR "Deducing distant :   $localEpKey -------> $remoteEpKey\n" if $debug;
+            print STDERR "   !remoteEpIsRemote && !localEpMatchesListener && remoteEpMatchesListener => outbound :  $localEpKey -------> $remoteEpKey\n" if $debug;
             $$desc{direction} = "outbound";
          }        
          else {
@@ -431,23 +457,26 @@ sub determineDirection {
       }
    }
    elsif ($$desc{type} eq 'looping') {
+
+      print STDERR "Looping connection\n" if $debug;
+ 
       if ($localEpMatchesListener && !$remoteEpMatchesListener) {
          my $invKey  = $remoteEpKey . $localEpKey;
          if (! exists $$allConnections{$invKey}) {
             # Only one side of the connection is listed
-            print STDERR "Deducing looping :   $localEpKey <------- $remoteEpKey\n" if $debug;
+            print STDERR "   localEpMatchesListener && !remoteEpMatchesListener => inbound   :  $localEpKey <------- $remoteEpKey\n" if $debug;
             $$desc{direction} = "inbound";
          }
          else {
-            # Both sides of the conneciton are listed; select the other one
-            print STDERR "Deducing looping :   $localEpKey <~~~~~~~ $remoteEpKey\n" if $debug;
+            # Both sides of the connection are listed; select the other one (for later), mark this one as duplicate
+            print STDERR "   localEpMatchesListener && !remoteEpMatchesListener => duplicate :  $localEpKey <------- $remoteEpKey\n" if $debug;
             $$desc{direction} = "duplicate";
          }
       }
       elsif (!$localEpMatchesListener && $remoteEpMatchesListener) {
          my $invKey  = $remoteEpKey . $localEpKey;
          # Irrespective of whether both or just one side of the connection are listed, select this one!
-         print STDERR "Deducing looping :   $localEpKey -------> $remoteEpKey\n" if $debug;
+         print STDERR "   !localEpMatchesListener && remoteEpMatchesListener => outbound :  $localEpKey -------> $remoteEpKey\n" if $debug;
          $$desc{direction} = "outbound";
       }
       else {
@@ -459,6 +488,15 @@ sub determineDirection {
    else {
       die "Unknown type '$$desc{type}' found\n"
    }
+}
+
+# -----------------------------------------------------------------------------
+# Helper
+# -----------------------------------------------------------------------------
+
+sub tf {
+   my($x) = @_;
+   if ($x) { return "true" } else { return "false" }
 }
 
 # -----------------------------------------------------------------------------
@@ -476,6 +514,8 @@ sub findReverse {
    # Don't bother to look up local addresses etc
    #
    my $type = $ip->iptype();
+   #
+   # Sometimes one may give up early
    # print "Type of " . $ip->ip() . ": $type\n";   
    # return '' if ($type ne 'PUBLIC');
    #
@@ -811,7 +851,6 @@ sub sortByState {
 # -----------------------------------------------------------------------------
 
 sub obtainLocalIpAddresses {
-   my ($debug) = @_;
    my $res = {}; # map which maps an IP string representation to a Net::IP object
    #
    # IO::Interface::Simple only collects IPv4 interface addresses; currently there 
@@ -826,7 +865,7 @@ sub obtainLocalIpAddresses {
             die "Could not transform the address " . $if->address . " of interface '$if' into a Net::IP\n" unless $ip;
             $$res{$ip->ip} = $ip;
             if ($debug) { 
-               print STDERR "Interface '$if' with address '" . $if->address . "' registered with IP address string '" . $ip->ip . "'\n";
+               print STDERR sprintf("Interface %-7s with address %-20s registered with IPv4 address string %s\n", "'" . $if . "'" , "'" . $if->address . "'", "'" . $ip->ip . "'");
             }
          }
       }
@@ -847,7 +886,7 @@ sub obtainLocalIpAddresses {
             die "Could not transform the address " . $rawIp . " of interface '$if' into a Net::IP\n" unless $ip;
             $$res{$ip->ip} = $ip;
             if ($debug) { 
-               print STDERR "Interface '$if' registered with IP address string '" . $ip->ip . "'\n";
+               print STDERR sprintf("Interface %-7s registered with IPv6 address string %s\n", "'" . $if . "'" , "'" . $ip->ip . "'");
             }
          }
       }
