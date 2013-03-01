@@ -18,47 +18,11 @@ The above suppresses error messages and makes "watch" run the script every secon
     watch most_connected_ip.pl 
 
 should work too.
-
-License
--------
-
-Apache License, Version 2.0
-
+   
 Tested on
 ---------
 
 Fedora 17, Red Hat Linux 6, Red Hat Linux 5
-
-Change log
-----------
-
-<table>
-<tr>
-<td>2013-02-12</td>
-<td>Correctly handle "netstat --wide", which may or may not work depending on the system. 
-Correctly parse netstat output with IPv6 addresses.</td>
-</tr>
-<tr>
-<td>2013-02-28</td>
-<td>IPv4 addresses assigned to the local machine are obtained via IO::Interface::Simple. 
-Complemented this with a readout of /proc/net/if_inet6 for the IPv6 addresses.
-Netstat output parsing went wrong on Ubuntu (the IPv6 loopback is apparently shown as
-127.0.0.1); fixed. (Maybe one should not bother with netstat at all and use /proc directly)</td>
-</tr>
-<tr>
-<td>2013-02-28</td>
-<td>Printout made nicer; fields are aligned whether IPv6 addresses show up or not.</td>
-</tr>
-</table>
-
-TODO
-----
-
-<table>
-<tr>
-<td>When the reverse DNS lookup fails, one should traceroute to find the last IP that reverse-resolves</td>
-</tr>
-</table>
 
 Sample output
 -------------
@@ -91,5 +55,64 @@ lines have been ignored in this case.
         127.0.0.1                      --> 127.0.0.1:7998      :    1                                              1 x TIME_WAIT
         127.0.0.1                      --> 127.0.0.1:3351      :    1                                              1 x ESTABLISHED
         127.0.0.1                      --> 127.0.0.1:32000     :    1                                              1 x ESTABLISHED
+
+License
+-------
+
+Copyright 2012<br>
+M-PLIFY S.A.<br>
+21, rue Glesener<br>
+L-1631 Luxembourg
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Change log
+----------
+
+<table>
+<tr>
+<td>2013-02-12</td>
+<td>Correctly handle "netstat --wide", which may or may not work depending on the system. 
+Correctly parse netstat output with IPv6 addresses.</td>
+</tr>
+<tr>
+<td>2013-02-28</td>
+<td>IPv4 addresses assigned to the local machine are obtained via IO::Interface::Simple. 
+Complemented this with a readout of /proc/net/if_inet6 for the IPv6 addresses.
+Netstat output parsing went wrong on Ubuntu (the IPv6 loopback is apparently shown as
+127.0.0.1); fixed. (Maybe one should not bother with netstat at all and use /proc directly)</td>
+</tr>
+<tr>
+<td>2013-02-28</td>
+<td>Printout made nicer; fields are aligned whether IPv6 addresses show up or not.</td>
+</tr>
+<tr>
+<td>2013-03-01</td>
+<td>127.0.0.1 was no longer recognized as of type LOOPBACK; fixed. Improved debug messages.</td>
+</tr>
+</table>
+
+TODO
+----
+
+<table>
+<tr>
+<td>When the reverse DNS lookup fails, one should traceroute to find the last IP that reverse-resolves. Mite be
+cool, but this means that the "watch looping" has to be done by the script itself as one wants to remember the
+last traceroute results, which may have taken a LONG time.</td>
+</tr>
+</table>
+
+
 
 
