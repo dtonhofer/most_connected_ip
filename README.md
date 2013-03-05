@@ -19,6 +19,19 @@ The above suppresses error messages and makes "watch" run the script every secon
 
 should work too.
    
+Problems
+--------
+
+Short-lived connections that a created and disappear before they can appear in the next `netstat` listing are invisible.
+For that, only something based on `tcpdump(8)` helps.
+
+See also
+--------
+
+   - [nnetstat.pl](http://www.muenster.de/~alnep/linux/Nnetstat/) - Perl/Gtk version of netstat.
+   - [Wireshark](http://www.wireshark.org/) - Wireshark (ex Ethereal), which is the dog's bollocks
+   - For Microsoft Windows, there is [tcpview](http://technet.microsoft.com/en-us/sysinternals/bb897437.aspx)
+   
 Tested on
 ---------
 
@@ -110,6 +123,9 @@ TODO
 <td>When the reverse DNS lookup fails, one should traceroute to find the last IP that reverse-resolves. Mite be
 cool, but this means that the "watch looping" has to be done by the script itself as one wants to remember the
 last traceroute results, which may have taken a LONG time.</td>
+</tr>
+<tr>
+<td>Also list the process owning the connection; info about this can be obtained with `lsof(8)`</td>
 </tr>
 </table>
 
