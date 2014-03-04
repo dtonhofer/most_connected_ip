@@ -37,7 +37,7 @@ Similar programs
 Tested on
 ---------
 
-Fedora 17, Red Hat Linux 6, Red Hat Linux 5
+Fedora 17/18, Red Hat Linux 6, Red Hat Linux 5
 
 Sample output
 -------------
@@ -115,6 +115,11 @@ Netstat output parsing went wrong on Ubuntu (the IPv6 loopback is apparently sho
 <td>2013-03-01</td>
 <td>127.0.0.1 was no longer recognized as of type LOOPBACK; fixed. Improved debug messages.</td>
 </tr>
+<tr>
+<td>2014-03-04</td>
+<td>
+When running teamviewer client, connections that are localhost->localhost show up that may have: No corresponding server socket; May only go "one way", i.e. the second entry of the typical bidirectional TCP connection is missing. How is that possible? ...the script could not handle that. FIXED! Also: Net::IP 1.25 declares that an IP address on 127.0.0.1 is "PRIVATE", not on the "LOOPBACK". This is weird, and is now being forcefully "fixed". Maybe this will go away im later versions!
+</td>
 </table>
 
 TODO
