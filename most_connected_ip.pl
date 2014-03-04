@@ -39,11 +39,14 @@ use Net::DNS::Resolver;    # http://search.cpan.org/~nlnetlabs/Net-DNS-0.72/lib/
 use Net::IP qw(:PROC);     # http://search.cpan.org/dist/Net-IP/IP.pm
 use IO::Interface::Simple; # http://search.cpan.org/~lds/IO-Interface/Interface/Simple.pm 
                            # Run: yum install  perl-Net-DNS.i686  perl-Net-IP   perl-IO-Interface
-
-
-my $debug      = 0;        # Set to 1 for debugging output to STDERR
 my $dnsNameLen = 50;       # Determines the size of the hostname printed to STDOUT
 my $portSep    = "/";      # How to separate IP address and port (traditionally ":", but that is confusing)
+
+# ---- 
+# Passing "--debug" activates debugging
+# ----
+
+my $debug = ($ARGV[0] && $ARGV[0] eq '--debug');
 
 # ----
 # Obtain IP addresses assigned to local interfaces as a set. The set is implemented as a hash
@@ -114,15 +117,16 @@ foreach my $key (keys %$allConnections) {
    my $desc = $$allConnections{$key};
    #
    # Set the value of the key "type" in the "desc" hash:
-   # type == "looping"  : both remote IP and local IP are the loopback address
-   # type == "distant"  : neither the remote IP nor the local IP are the loopback address
+   # "looping"  : both remote IP and local IP are the loopback address
+   # "distant"  : neither the remote IP nor the local IP are the loopback address
    #  
    determineType($desc); 
    #
    # Set the value of the key "direction" in the "desc" hash:
-   # direction == "inbound"    a connection for which the "local endpoint" is the server side
-   # direction == "outbound"   a connection for which the "remote endpoint" is the server side
-   # direction == "duplicate"  a connection with type == "looping" which is the symmetric representation of another one
+   # "inbound"     : a connection for which the "local endpoint" is the server side
+   # "outbound"    : a connection for which the "remote endpoint" is the server side
+   # "duplicate"   : a connection with type == "looping" which is the symmetric representation of another one
+   # "serverless"  : a connection with type == "looping" but with no server socket
    #
    determineDirection($allListeners,$allConnections,$localIpAddresses,$desc) 
 }
@@ -130,7 +134,7 @@ foreach my $key (keys %$allConnections) {
 if ($debug) {
    foreach my $key (sort keys %$allConnections) {
       my $desc = $$allConnections{$key};
-      if ($$desc{direction} ne 'duplicate') {
+      if (! ($$desc{direction} =~ /duplicate/)) {
          print "$key : type = $$desc{type} , direction = $$desc{direction}\n"
       }
    }
@@ -307,17 +311,37 @@ sub determineType {
    my $localType  = findType($localIp);
    my $remoteType = findType($remoteIp);
    print STDERR "Local IP '" . $localIp->short . "' has type '$localType'; Remote IP '" . $remoteIp->short . "' has type '$remoteType' => " if $debug;
-
-   if ($localType =~ /LOOPBACK/ && $remoteType =~ /LOOPBACK/) {
-      $$desc{type} = "looping"
-   }
-   elsif ($localType =~ /LOOPBACK/ || $remoteType =~ /LOOPBACK/) {
-      die "Found bizarre half-loopback connection $localIp -> $remoteIp\n";
-   }
-   else {
+   #
+   # A "do loop" to allow process-then-jump-to-end
+   #
+   {
+      #
+      # Both sides are classified as LOOPBACK --> "looping"
+      #
+      if ($localType =~ /LOOPBACK/ && $remoteType =~ /LOOPBACK/) {
+         $$desc{type} = "looping";
+         last
+      }   
+      #
+      # At this point, if one of the sides is a LOOPBACK, but the other not --> problem
+      #
+      if ($localType =~ /LOOPBACK/ || $remoteType =~ /LOOPBACK/) {
+         die "Found bizarre half-loopback connection '" . $localIp->short . "' -> '" . $remoteIp->short . "'\n";
+      }
+      #
+      # At this point, one may want to check the types 
+      # 
+      if (! $localType =~ /(PRIVATE|PUBLIC|GLOBAL-UNICAST)/ ) {
+         die "Found connection with unknown local type '$localType'\n";
+      }
+      if (! $remoteType =~ /(PRIVATE|PUBLIC|GLOBAL-UNICAST)/ ) {
+         die "Found connection with unknown remote type '$remoteType'\n";
+      }
+      #
+      # At this point, we can have any combination of PUBLIC and PRIVATE, and it will always be "distant"
+      #  
       $$desc{type} = "distant"
    }
-
    print STDERR $$desc{type} . "\n" if $debug;
 }
 
@@ -331,7 +355,16 @@ sub determineType {
 sub findType {
    my($ip) = @_;
    if ($ip->version == 4) {
-      return "V4:" . $ip->iptype
+      #
+      # There is some kind of bizarre problem whereby (at least on Fedora 18), 127.0.0.1 is 
+      # classified as "PRIVATE" instead of "LOOPBACK"
+      #
+      my $iptype = $ip->iptype;
+      if ($ip->ip =~ /^127\./ && $iptype ne 'LOOPBACK') {
+         print STDERR "Fixing type of address '" . $ip->ip . "' from '$iptype' to 'LOOPBACK'\n" if $debug;
+         $iptype = 'LOOPBACK'
+      }
+      return "V4:" . $iptype
    }
    elsif ($ip->version == 6) {
       return "V6:" . $ip->iptype
@@ -393,6 +426,10 @@ sub findType {
 #
 # In this case, we throw away the representation where the server side
 # is on the local endpoint. Otherwise, proceed as above. 
+#
+#
+# Special case: "looping" connections but no server side (i.e. the server 
+# socket does not exist!). See code...
 # -----------------------------------------------------------------------------
 
 sub determineDirection {
@@ -450,9 +487,9 @@ sub determineDirection {
             $$desc{direction} = "outbound";
          }        
          else {
-            die "Woah! localEpMatchesListener = '$localEpMatchesListener' and " .
+            die "Woah! For distant connection: localEpMatchesListener = '$localEpMatchesListener' and " .
                 "remoteEpMatchesListener = '$remoteEpMatchesListener' " .
-                " with local endpoint $localEpKey and remote endpoint $remoteEpKey\n";
+                "with local endpoint '$localEpKey' and remote endpoint '$remoteEpKey'\n";
          }
       }
    }
@@ -479,10 +516,28 @@ sub determineDirection {
          print STDERR "   !localEpMatchesListener && remoteEpMatchesListener => outbound :  $localEpKey -------> $remoteEpKey\n" if $debug;
          $$desc{direction} = "outbound";
       }
+      elsif (!$localEpMatchesListener && !$remoteEpMatchesListener) {
+         # A loopback connection with no listener (server socket) actually occurs (case of Teamviewer client on Fedora 18)
+         # Can the server socket have gone away?
+         #
+         # There may not even be a duplicate entry going the other way.... at least during connection shutdown. 
+         # If both sides of the connection are listed; select the one which is lexicographically smaller; mark the other as duplicate
+         #
+         my $invKey  = $remoteEpKey . $localEpKey;
+         my $thisKey = $localEpKey . $remoteEpKey;
+         if (!exists $$allConnections{$invKey} || ($thisKey lt $invKey)) {
+            print STDERR "   !localEpMatchesListener && !remoteEpMatchesListener => serverless :  $localEpKey ---?---- $remoteEpKey\n" if $debug;
+            $$desc{direction} = "serverless";
+         }
+         else { 
+            print STDERR "   !localEpMatchesListener && !remoteEpMatchesListener => serveless duplicate :  $localEpKey ---?---- $remoteEpKey\n" if $debug;
+            $$desc{direction} = "duplicate";
+         }
+      }
       else {
-         die "Woah! localEpMatchesListener = '$localEpMatchesListener' and " .
+         die "Woah! For looping connection: localEpMatchesListener = '$localEpMatchesListener' and " .
              "remoteEpMatchesListener = '$remoteEpMatchesListener' " .
-             " with local endpoint $localEpKey and remote endpoint $remoteEpKey\n";
+             "with local endpoint '$localEpKey' and remote endpoint '$remoteEpKey'\n";
       }
    }
    else {
@@ -694,6 +749,25 @@ sub groupLoopingConnections {
             }
          }
       }
+      elsif ($direction eq 'serverless') {
+         # Group by remote endpoint and by local IP
+         $newKey = $remoteIp->ip . "," . $remotePort . "," . $localIp->ip . ",serverless";
+         if (!exists $$groupBy{$newKey}) {
+            # Create the grouping record if it doesn't exist yet
+            my $localEp  = $localIp->short . $portSep . $localPort; # Full description, no real grouping....
+            my $remoteEp = $remoteIp->short . $portSep . $remotePort;
+            $maxLocalEpWidth  = max($maxLocalEpWidth,  length($localEp));
+            $maxRemoteEpWidth = max($maxRemoteEpWidth, length($remoteEp));
+            $$groupBy{$newKey} = { 
+               localEp       => $localEp,
+               remoteEp      => $remoteEp,
+               stateSubHash  => { }, # this will contain the state counters, filled by registerState() below
+               count         => 0,
+               key           => $newKey,
+               serverless    => 1
+            }
+         }
+      }
       else {
          die "Unknown direction '$direction'\n";
       }
@@ -776,7 +850,11 @@ sub printLoopingConnections {
       my $remoteEp  = $$gDesc{remoteEp};
       my $count     = $$gDesc{count};
       my $stateText = buildStateText($$gDesc{stateSubHash});
-      print sprintf($format, $localEp, "-->", $remoteEp, $count, '', $stateText);
+      my $arrow = "-->";
+      if ($$gDesc{serverless}) {
+         $arrow = "-?-"
+      }
+      print sprintf($format, $localEp, $arrow, $remoteEp, $count, '', $stateText);
    }
 }
 
