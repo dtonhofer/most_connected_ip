@@ -829,9 +829,9 @@ sub printDistantConnections {
       }
       else {
          if (length($dnsName) > $dnsNameLen) {
-            $dnsName = substr($dnsName, $dnsNameLen)
+            $dnsName = '...' . substr($dnsName, -($dnsNameLen-3))
          }
-      }      
+      }
       my $stateText = buildStateText($$gDesc{stateSubHash});
       print sprintf($format, $localEp, $arrow, $remoteEp, $count, $dnsName, $stateText);
    }
