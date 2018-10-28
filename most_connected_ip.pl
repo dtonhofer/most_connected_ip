@@ -1,36 +1,45 @@
 #!/usr/bin/perl
 
 ################################################################################
-# 
 # Extremely simple script to process (Linux) netstat output to show the 
 # established TCP connections and their state on the local machine, grouped by
 # endpoint (IP:port).
 #
 # Hosted at GitHub: https://github.com/dtonhofer/most_connected_ip.git
 #
-# The following can be passed:
-#
-# --debug    to activate debugging
-# --nodns    to disable reverse DNS lookup
-# --debugdns tells more about DNS requests
-# --loop[=N] to cause the program to loop every N seconds
-#            N can be missing (default is 1s), or else 1..3600)
-#
 # Example
 # -------
 #
 #   most_connected_ip.pl --debugdns --loop=5 2>/dev/null
-#
 #   most_connected_ip.pl --notiming
-#
-# Just runs once and also prints out how long DNS reverse resolution took.
 #
 # History
 # -------
 #
-# 2012-XX-XX: Initial version.
-# 2018-10-28: Added code to handle loop and time it took for DNS reverse
-#             resolution.
+# 2013-02-12 	Correctly handle "netstat --wide", which may or may not work
+#               depending on the system. Correctly parse netstat output with IPv6
+#               addresses.
+# 2013-02-28 	IPv4 addresses assigned to the local machine are obtained via
+#               IO::Interface::Simple. Complemented this with a readout of
+#               /proc/net/if_inet6 for the IPv6 addresses. Netstat output parsing
+#               went wrong on Ubuntu (the IPv6 loopback is apparently shown as 127.0.0.1);
+#               fixed. (Maybe one should not bother with netstat at all and use /proc 
+#               directly)
+# 2013-02-28 	Printout made nicer; fields are aligned whether IPv6 addresses
+#               show up or not.
+# 2013-03-01 	127.0.0.1 was no longer recognized as of type LOOPBACK; fixed.
+#               Improved debug messages.
+# 2014-03-04 	When running teamviewer client, connections that are 
+#               localhost->localhost show up that may have: 
+#               - No corresponding server socket; 
+#               - May only go "one way", i.e. the second entry of the typical 
+#                 bidirectional TCP connection is missing. How is that possible?
+#               ...the script could not handle that. FIXED! 
+#               Also: Net::IP 1.25 declares that an IP address on 127.0.0.1 is "PRIVATE",
+#               not on the "LOOPBACK". This is weird, and is now being forcefully "fixed".
+#               Maybe this will go away in later versions!
+# 2018-10-27 	Complete review; added options and made it possible to have the 
+#               program loop instead of having to use `watch`
 ################################################################################
 # Copyright 2012 M-PLIFY S.A.
 #
