@@ -1,22 +1,36 @@
-#!/usr/bin/perl -w
+#!/usr/bin/perl
 
 ################################################################################
+# 
 # Extremely simple script to process (Linux) netstat output to show the 
 # established TCP connections and their state on the local machine, grouped by
 # endpoint (IP:port).
 #
 # Hosted at GitHub: https://github.com/dtonhofer/most_connected_ip.git
 #
-# Best used with "watch" for continual updates, like this:
+# The following can be passed:
 #
-#   watch -n 1 "perl most_connected_ip.pl 2>/dev/null"
+# --debug    to activate debugging
+# --nodns    to disable reverse DNS lookup
+# --debugdns tells more about DNS requests
+# --loop[=N] to cause the program to loop every N seconds
+#            N can be missing (default is 1s), or else 1..3600)
 #
-# The above suppresses error messages and makes "watch" run the script
-# every second. Of course a simple
+# Example
+# -------
 #
-#   watch most_connected_ip.pl 
+#   most_connected_ip.pl --debugdns --loop=5 2>/dev/null
 #
-# should work too.
+#   most_connected_ip.pl --notiming
+#
+# Just runs once and also prints out how long DNS reverse resolution took.
+#
+# History
+# -------
+#
+# 2012-XX-XX: Initial version.
+# 2018-10-28: Added code to handle loop and time it took for DNS reverse
+#             resolution.
 ################################################################################
 # Copyright 2012 M-PLIFY S.A.
 #
@@ -34,160 +48,271 @@
 ################################################################################
 
 use strict;
-use List::Util qw[min max];
+use warnings;
+
+use List::Util qw(min max);
+use Term::Cap;
+use Time::HiRes qw(gettimeofday);
+use POSIX qw(floor);
+use Getopt::Long;          # Core module
 use Net::DNS::Resolver;    # http://search.cpan.org/~nlnetlabs/Net-DNS-0.72/lib/Net/DNS/Resolver.pm
 use Net::IP qw(:PROC);     # http://search.cpan.org/dist/Net-IP/IP.pm
 use IO::Interface::Simple; # http://search.cpan.org/~lds/IO-Interface/Interface/Simple.pm 
-                           # Run: yum install  perl-Net-DNS.i686  perl-Net-IP   perl-IO-Interface
-my $dnsNameLen = 50;       # Determines the size of the hostname printed to STDOUT
+                           # Run: dnf install perl-Net-DNS perl-Net-IP  perl-IO-Interface
+
 my $portSep    = "/";      # How to separate IP address and port (traditionally ":", but that is confusing)
 
-# ---- 
-# Passing "--debug" activates debugging
-# ----
+# --- 
+# Arg/Option processing
+# ---
 
-my $debug = ($ARGV[0] && $ARGV[0] eq '--debug');
+my $debug      = 0;     # set to 1 if cmdline option set (used as global variable)
+my $nodns      = 0;     # set to 1 if cmdline option set (used as global variable)
+my $notiming   = 0;     # set to 1 if cmdline option set (used as global variable)
+my $debugdns   = 0;     # set to 1 if cmdline options set (used as global variable) 
+my $dnsnamelen = 50;    # determines the size of the hostname printed to STDOUT
+my $help       = 0;     # set to 1 if cmdline option set
+my $loop       = undef; # set to 0 if cmdline option set with nor integer arg; to integer otherwise
 
-# ----
+my $mindnsnamelen = 30;
+
+my $res = GetOptions ("debug"        => \$debug,      # flag       
+                      "nodns"        => \$nodns,      # flag
+                      "notiming"     => \$notiming,   # flag
+                      "debugdns"     => \$debugdns,   # flag
+                      "dnsnamelen=i" => \$dnsnamelen, # mandatory numeric value
+                      "help"         => \$help,       # flag
+                      "loop:i"       => \$loop);      # optional numeric value
+
+if (!$res || $help ||
+    (defined($loop) && ($loop<0 || $loop>3600)) ||
+    ($dnsnamelen < $mindnsnamelen)) {
+   print STDERR "The following can be passed:\n";
+   print STDERR "--debug         To activate debugging output.\n";
+   print STDERR "--nodns         To disable reverse DNS lookup; just IP addresses will be printed.\n";
+   print STDERR "--notiming      Do not insert time taken for DNS lookups in output.\n";
+   print STDERR "                (note that timing is printed only on lookup; if there is a cache\n";
+   print STDERR "                hit on the program cache, no timing information will be printed in any case)\n";
+   print STDERR "--debugdns      Print time taken for DNS lookup to STDERR; useful when debugging DNS problems.\n";
+   print STDERR "                (you may also want to wield this: 'tcpdump -i lo udp port 53')\n";
+   print STDERR "--dnsnamelen=N  Size of column holding the DNS lookup result (default $dnsnamelen; at least $mindnsnamelen).\n";
+   print STDERR "--loop[=N]      The program will loop every N seconds, forever, instead of running once only.\n";
+   print STDERR "                (N can be missing (default is 1) or else 1..3600)\n";
+   exit 1
+}
+
+if (!defined($loop)) {
+   $loop = 0
+}
+else {
+   if ($loop == 0) {
+      $loop = 1
+   }
+}
+die unless defined($loop) && (0<=$loop && $loop<=3600);
+
+# print STDERR "debug    = $debug\n";
+# print STDERR "nodns    = $nodns\n";
+# print STDERR "help     = $help\n";
+# print STDERR "loop     = $loop\n";
+
+# ---
 # Obtain IP addresses assigned to local interfaces as a set. The set is implemented as a hash
 # which maps "IP address as string" --> Net::IP instance. This includes the loopback address.
-# ----
+# ---
 
 my $localIpAddresses = obtainLocalIpAddresses();
 
-# ----
+# ---
 # For querying DNS names: a local cache and the resolver itself (not sure the local cache
-# is needed as the DNS resolver has its own cache, right?)
+# is needed as the DNS resolver has its own cache, right??)
 # The "reverseIpMap" maps a Net::IP instance to its reverse name and the date of last use.
-# ----
+#
+# Net::DNS::Resolver->new 
+# takes a lot of parameters. See https://metacpan.org/pod/Net::DNS::Resolver#new
+#
+# Noticed on Fedora 28:
+# If /etc/resolv.conf does not explicitly indicate "nameserver 127.0.0.1", 
+# Net::DNS::Resolver will issue a query over IPv6 first, (which may take seconds to time out)
+#
+# To debug queries with tcpdump: tcpdump -i lo udp port 53
+# ---
 
 my $reverseIpMap = { }; 
 my $dnsResolver  = Net::DNS::Resolver->new;
 
-# ----
-# Hoover up the "netstat" output into an array of lines.
-# In some cases, the "--wide" option is needed to get correct output.
-# ----
+# ---
+# If netstat has the "--wide" option, use it!
+# ---
 
-my @lines;
+my $useWide = '';  # set to '--wide' for use in command later
 
 {
-   @lines = `netstat --help 2>&1`; # return value is 4
-
-   my $useWide = ''; 
-
+   my @lines = `netstat --help 2>&1`; # return value is 4
    foreach (@lines) { $useWide = ' --wide ' if ($_ =~ /\-\-wide/) }
+}
 
-   @lines = `netstat --tcp $useWide -n -a`;
+# ---
+# Main loop
+# ---
 
-   if ($? != 0) {
-      print STDERR "Could not run 'netstat': $!\n";
-      exit 1
+my $stop = 0;
+
+while (!$stop) {
+
+   if ($loop) {
+      # clear screen
+      my $terminal = Term::Cap->Tgetent;
+      print $terminal->Tputs('cl')
    }
-}
 
-# ----
-# Pre-process netstat lines, collecting "connections" and "listeners" into separate hashes.
-# ----
+   my $start = time;
 
-my $allConnections = {}; # information about TCP connections as hash, keyed by a constructed string
-my $allListeners   = {}; # information about TCP sockets (listeners) as hash, keyed by a constructed string
+   my @lines = obtainNetstatOutput($useWide);
 
-foreach my $line (@lines) {
-   chomp $line;
-   analyzeNetstatLine($line, $allConnections, $allListeners)
-}
+   my $allConnections = {}; # information about TCP connections as hash, keyed by a constructed string
+   my $allListeners   = {}; # information about TCP sockets (listeners) as hash, keyed by a constructed string
 
-if ($debug) {
-   foreach my $key (sort keys %$allConnections) {
-      print STDERR "Connection : $key\n"
+   analyzeAllNetstatLines(\@lines,$allConnections,$allListeners);
+   postprocessAllConnections($allListeners,$allConnections);
+   generateResult($allConnections);
+
+   # Sleep for the remainder of the time allotted for a loop
+
+   if (!$loop) {
+      $stop = 1;
    }
-   foreach my $key (sort keys %$allListeners) {
-      print STDERR "Listener   : $key\n"
-   }
-}
-
-# ----
-# Post-process information now in "allConnections" and "allListeners". The values in these hashes
-# are themselves hashes mapping strings to detail information (i.e. attribute-value pairs).
-# Decorating these hashes with additional info.
-# ----
-
-foreach my $key (keys %$allConnections) {
-   my $desc = $$allConnections{$key};
-   #
-   # Set the value of the key "type" in the "desc" hash:
-   # "looping"  : both remote IP and local IP are the loopback address
-   # "distant"  : neither the remote IP nor the local IP are the loopback address
-   #  
-   determineType($desc); 
-   #
-   # Set the value of the key "direction" in the "desc" hash:
-   # "inbound"     : a connection for which the "local endpoint" is the server side
-   # "outbound"    : a connection for which the "remote endpoint" is the server side
-   # "duplicate"   : a connection with type == "looping" which is the symmetric representation of another one
-   # "serverless"  : a connection with type == "looping" but with no server socket
-   #
-   determineDirection($allListeners,$allConnections,$localIpAddresses,$desc) 
-}
-
-if ($debug) {
-   foreach my $key (sort keys %$allConnections) {
-      my $desc = $$allConnections{$key};
-      if (! ($$desc{direction} =~ /duplicate/)) {
-         print "$key : type = $$desc{type} , direction = $$desc{direction}\n"
+   else {
+      my $end   = time;
+      my $sleep = $loop - (time - $start);
+      if ($sleep > 0) {
+         sleep($sleep) # may sleep less if interrupted, but so what
       }
    }
 }
 
-# ----
-# Result generation: Group and print; the data is analyzed fully before printing in 
-# order to establish the width of the "local endpoint" and "remote endpoint" fields
-# ----
+# ===
+# Pre-process netstat lines, collecting "connections" and "listeners" into separate hashes.
+# ===
 
-my $connCountMap     = {}; # map direction to number of connections
-my $groupByMap       = {}; # map direction to a hash which maps grouping key to a value-holding hash
-my $loopConnCount;         # number of looping connections
-my $dupLoopConnCount;      # number of looping connections shown twice by netstat (one of the lines is thrown away)
-my $loopGroupBy;           # hash which maps grouping key to a value-holding hash
-my $maxLocalEpWidth  = 0;  # how large shall "local endpoint" field be
-my $maxRemoteEpWidth = 0;  # how large shall "remote endpoint" field be
+sub analyzeAllNetstatLines {
+   my($lines,$allConnections,$allListeners) = @_;
+   foreach my $line (@$lines) {
+      chomp $line;
+      analyzeNetstatLine($line, $allConnections, $allListeners)
+   }
 
-for my $direction ('inbound', 'outbound') {
-   my $res = groupDistantConnections($allConnections,$direction,$reverseIpMap,$dnsResolver);
-   $$groupByMap{$direction}   = $$res{groupBy};
-   $$connCountMap{$direction} = $$res{connCount};
-   $maxLocalEpWidth           = max($maxLocalEpWidth, $$res{maxLocalEpWidth});
-   $maxRemoteEpWidth          = max($maxRemoteEpWidth,$$res{maxRemoteEpWidth});
-}
-
-{
-   my $res = groupLoopingConnections($allConnections,$reverseIpMap,$dnsResolver);
-   $loopConnCount     = $$res{loopConnCount};
-   $dupLoopConnCount  = $$res{dupLoopConnCount};
-   $loopGroupBy       = $$res{loopGroupBy};
-   $maxLocalEpWidth   = max($maxLocalEpWidth, $$res{maxLocalEpWidth});
-   $maxRemoteEpWidth  = max($maxRemoteEpWidth,$$res{maxRemoteEpWidth});
-}
-
-for my $direction ('inbound', 'outbound') {
-   if ($$connCountMap{$direction} > 0) {
-      print "Distant $direction connections: " . $$connCountMap{$direction} . "\n";
-      printDistantConnections($$groupByMap{$direction},$direction,$maxLocalEpWidth,$maxRemoteEpWidth)
+   if ($debug) {
+      foreach my $key (sort keys %$allConnections) {
+         print STDERR "Connection : $key\n"
+      }
+      foreach my $key (sort keys %$allListeners) {
+         print STDERR "Listener   : $key\n"
+      }
    }
 }
 
-if ($loopConnCount > 0) {
-   print "Looping connections: $loopConnCount";
-   print " ($dupLoopConnCount duplicate lines skipped)" if $dupLoopConnCount;
-   print "\n";
-   printLoopingConnections($loopGroupBy,$maxLocalEpWidth,$maxRemoteEpWidth);
+# ===
+# Post-process information now in "allConnections" and "allListeners". The values in these hashes
+# are themselves hashes mapping strings to detail information (i.e. attribute-value pairs).
+# Decorating these hashes with additional info.
+# ===
+
+sub postprocessAllConnections {
+   my($allListeners,$allConnections) = @_; 
+
+   foreach my $key (keys %$allConnections) {
+      my $desc = $$allConnections{$key};
+      #
+      # Set the value of the key "type" in the "desc" hash:
+      # "looping"  : both remote IP and local IP are the loopback address
+      # "distant"  : neither the remote IP nor the local IP are the loopback address
+      #  
+      determineType($desc); 
+      #
+      # Set the value of the key "direction" in the "desc" hash:
+      # "inbound"     : a connection for which the "local endpoint" is the server side
+      # "outbound"    : a connection for which the "remote endpoint" is the server side
+      # "duplicate"   : a connection with type == "looping" which is the symmetric representation of another one
+      # "serverless"  : a connection with type == "looping" but with no server socket
+      #
+      determineDirection($allListeners,$allConnections,$localIpAddresses,$desc) 
+   }
+
+   if ($debug) {
+      foreach my $key (sort keys %$allConnections) {
+         my $desc = $$allConnections{$key};
+         if (! ($$desc{direction} =~ /duplicate/)) {
+            print "$key : type = $$desc{type} , direction = $$desc{direction}\n"
+         }
+      }
+   }
 }
 
-exit 0;
+# ===
+# Result generation: Group and print; the data is analyzed fully before printing in 
+# order to establish the width of the "local endpoint" and "remote endpoint" fields
+# ===
 
+sub generateResult {
+   my($allConnections) = @_; 
 
-# -----------------------------------------------------------------------------
+   my $connCountMap     = {}; # map direction to number of connections
+   my $groupByMap       = {}; # map direction to a hash which maps grouping key to a value-holding hash
+   my $loopConnCount;         # number of looping connections
+   my $dupLoopConnCount;      # number of looping connections shown twice by netstat (one of the lines is thrown away)
+   my $loopGroupBy;           # hash which maps grouping key to a value-holding hash
+   my $maxLocalEpWidth  = 0;  # how large shall "local endpoint" field be
+   my $maxRemoteEpWidth = 0;  # how large shall "remote endpoint" field be
+
+   for my $direction ('inbound', 'outbound') {
+      my $res = groupDistantConnections($allConnections,$direction,$reverseIpMap,$dnsResolver);
+      $$groupByMap{$direction}   = $$res{groupBy};
+      $$connCountMap{$direction} = $$res{connCount};
+      $maxLocalEpWidth           = max($maxLocalEpWidth, $$res{maxLocalEpWidth});
+      $maxRemoteEpWidth          = max($maxRemoteEpWidth,$$res{maxRemoteEpWidth});
+   }
+
+   {
+      my $res = groupLoopingConnections($allConnections,$reverseIpMap,$dnsResolver);
+      $loopConnCount     = $$res{loopConnCount};
+      $dupLoopConnCount  = $$res{dupLoopConnCount};
+      $loopGroupBy       = $$res{loopGroupBy};
+      $maxLocalEpWidth   = max($maxLocalEpWidth, $$res{maxLocalEpWidth});
+      $maxRemoteEpWidth  = max($maxRemoteEpWidth,$$res{maxRemoteEpWidth});
+   }
+
+   for my $direction ('inbound', 'outbound') {
+      if ($$connCountMap{$direction} > 0) {
+         print "Distant $direction connections: " . $$connCountMap{$direction} . "\n";
+         printDistantConnections($$groupByMap{$direction},$direction,$maxLocalEpWidth,$maxRemoteEpWidth)
+      }
+   }
+
+   if ($loopConnCount > 0) {
+      print "Looping connections: $loopConnCount";
+      print " ($dupLoopConnCount duplicate lines skipped)" if $dupLoopConnCount;
+      print "\n";
+      printLoopingConnections($loopGroupBy,$maxLocalEpWidth,$maxRemoteEpWidth);
+   }
+}
+
+# ===
+# Hoover up the "netstat" output into an array of lines.
+# In some cases, the "--wide" option is needed to get correct output.
+# Note that Bourne shell file-descriptor redirection actually work
+# inside Perl backticks.
+# ===
+
+sub obtainNetstatOutput {
+   my($useWide) = @_;
+   my @lines = `netstat --tcp $useWide -n -a`;
+   my $exitCode = $?;
+   if ($exitCode != 0) { die "Could not run 'netstat', got exit code $exitCode: $!\n" }
+   return @lines;
+}
+
+# ===
 # netstat line parsing; write to STDERR if this fails.
 # On a single netstat line describing a connection, one finds:
 #   protocol        - may be "tcp" or "tcp6"
@@ -203,7 +328,7 @@ exit 0;
 #   local address   - may be "IPv4:PORT", "::ffff:IPv4:PORT", "IPv6:PORT"
 #   foreign address - "0.0.0.0:*", ":::*" 
 #   "LISTEN"
-# -----------------------------------------------------------------------------
+# ===
 
 sub analyzeNetstatLine {
    my ($line,$allConnections,$allListeners) = @_;
@@ -295,14 +420,14 @@ sub analyzeNetstatLine {
       # NOP
    }
    else {
-      print STDERR "Unmatched: '$line'\n";
+      print STDERR "Unmatched line in netstat output: '$line'\n";
    }
 }
  
-# -----------------------------------------------------------------------------
+# ===
 # Is this a "looping" (loopback address on both sides) or "distant" (something 
 # other than the loopback address on both sides) connection?
-# -----------------------------------------------------------------------------
+# ===
 
 sub determineType {
    my($desc) = @_;
@@ -345,12 +470,12 @@ sub determineType {
    print STDERR $$desc{type} . "\n" if $debug;
 }
 
-# -----------------------------------------------------------------------------
-# Find the type saturday night special
+# ===
+# A "find the type" saturday night special
 # The documentation for Net::IP 1.26 talks about functions
 # "ip_iptypev4" and "ip_iptypev6" but these don't exist!
 # We need to use "ip_iptype" 
-# -----------------------------------------------------------------------------
+# ===
 
 sub findType {
    my($ip) = @_;
@@ -374,7 +499,7 @@ sub findType {
    }
 }
  
-# -----------------------------------------------------------------------------
+# ===
 # We know whether the type of the connection is "looping" (loopback address
 # on both sides) or "distant" (something other than the loopback address on
 # both sides).
@@ -427,10 +552,9 @@ sub findType {
 # In this case, we throw away the representation where the server side
 # is on the local endpoint. Otherwise, proceed as above. 
 #
-#
 # Special case: "looping" connections but no server side (i.e. the server 
 # socket does not exist!). See code...
-# -----------------------------------------------------------------------------
+# ===
 
 sub determineDirection {
    my($allListeners,$allConnections,$localIpAddresses,$desc) = @_;
@@ -545,63 +669,76 @@ sub determineDirection {
    }
 }
 
-# -----------------------------------------------------------------------------
-# Helper
-# -----------------------------------------------------------------------------
+# ===
+# Helper to generate true/false text
+# ===
 
 sub tf {
    my($x) = @_;
    if ($x) { return "true" } else { return "false" }
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Given an IP address, find its symbolic name (i.e. the PTR record)
 # Returns "" if none found.
-# -----------------------------------------------------------------------------
+# This is pretty bad because the request to the DNS server may take a
+# long time, blocking the program. How to run multiple requests and
+# have them timeout faster??
+# ===
 
 sub findReverse {
    my ($ip,$reverseIpMap,$dnsResolver) = @_;
-   #
    # The passed "ip" is a Net::IP structure
-   #
+
    my $dnsName;
-   #
-   # Don't bother to look up local addresses etc
-   #
    my $type = $ip->iptype();
-   #
+   my $ipName = $ip->ip();
+
    # Sometimes one may give up early
    # print "Type of " . $ip->ip() . ": $type\n";   
    # return '' if ($type ne 'PUBLIC');
-   #
-   # Look in program-local cache first
-   #
-   my $ipName = $ip->ip();
-   my $cached = $$reverseIpMap{$ipName};
-   if ($cached) {
-      $dnsName = $$cached[0];
-      $$reverseIpMap{$ipName} = [ $dnsName, time() ];
-      return $dnsName
+   
+   # Look in program-local cache first and return at once if found
+  
+   {   
+      my $cached = $$reverseIpMap{$ipName};
+      if ($cached) {
+         my ($cachedDnsName,$when) = @$cached;
+         if (time - $when < 5*60) {
+            # cache entry still good
+            # return immediately, do not append anything
+            return $cachedDnsName
+         }
+         else {
+            # cache entry stale
+            delete $$reverseIpMap{$ipName};
+         }
+      }
    }
+
+   # Not in cache; ask DNS. 
+   # (unless bypass has been ordered with --nodns)
    #
-   # Not in cache; ask DNS
    # query() behaves appropriately and looks up the PTR record for "$4.$3.$2.$1.in-addr.arpa"
    # "If the name looks like an IP address (IPv4 or IPv6), then an appropriate PTR query will be performed."
-   #
-   my $packet = $dnsResolver->query($ipName);
+
+   my $start = gettimeofday(); # floating seconds since the epoch
+   print STDERR "Querying $ipName ..." if ($debugdns && !$nodns);
+
+   my $packet = $dnsResolver->query($ipName) unless $nodns;
+
    if (!$packet) {
+      # no response & timeout or "nodns"
       $dnsName = "?";
-      $$reverseIpMap{$ipName} = [ $dnsName, time() ]
    }
    else {
+      # response; concatenate possibly multiple responses
       $dnsName = "";
       my $addComma = 0;
       my @answer = $packet->answer;
       for my $rr (@answer) {
          if ($rr->type eq 'PTR') {
-            if ($addComma) {
-               $dnsName .= ","
-            }
+            $dnsName .= "," if ($addComma);
             $dnsName .= $rr->ptrdname;
             $addComma = 1
             # for my $key (keys %$rr) {
@@ -610,10 +747,24 @@ sub findReverse {
          }
       } 
    }
+
+   $$reverseIpMap{$ipName} = [ $dnsName, time ];
+
+   # append duration to answer if not "--notiming"
+
+   my $duration = floor((gettimeofday() - $start) * 1000);
+
+   print STDERR "got $dnsName ... in $duration ms\n" if ($debugdns && !$nodns);
+
+   if (!$notiming && !$nodns) {
+      # Also append to displayed output
+      $dnsName .= " ($duration ms)";
+   }
+
    return $dnsName
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Group the distant connections, basically doing a manual SQL GROUP BY
 # Only considers connections matching "reqDirection", i.e. either 'outbound'
 # or 'inbound' ones.
@@ -630,7 +781,7 @@ sub findReverse {
 # At "maxLocalEpWidth"  : the largest string width found for the "local endpoint"
 #
 # At "maxRemoteEpWidth" : the largest string width found for the "remote endpoint"
-# -----------------------------------------------------------------------------
+# ===
 
 sub groupDistantConnections {
    my ($allConnections,$reqDirection,$reverseIpMap,$dnsResolver) = @_;
@@ -693,9 +844,9 @@ sub groupDistantConnections {
             maxLocalEpWidth => $maxLocalEpWidth, maxRemoteEpWidth => $maxRemoteEpWidth }
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Group the looping connections, basically doing a manual SQL GROUP BY
-# -----------------------------------------------------------------------------
+# ===
 
 sub groupLoopingConnections {
    my ($allConnections,$reverseIpMap,$dnsResolver) = @_;
@@ -779,9 +930,9 @@ sub groupLoopingConnections {
             maxLocalEpWidth => $maxLocalEpWidth, maxRemoteEpWidth => $maxRemoteEpWidth }
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Helper
-# -----------------------------------------------------------------------------
+# ===
 
 sub unpackDesc {
    my($desc) = @_;
@@ -795,9 +946,9 @@ sub unpackDesc {
    return ($localIp,$localPort,$remoteIp,$remotePort,$state,$direction,$type)
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Helper
-# -----------------------------------------------------------------------------
+# ===
 
 sub registerState {
    my($stateSubHash,$state) = @_;
@@ -807,12 +958,12 @@ sub registerState {
    $$stateSubHash{$state}++
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Printer for "distant" connections
-# -----------------------------------------------------------------------------
+# ===
 
 sub printDistantConnections {
-   my($groupBy,$direction,$maxLocalEpWdith,$maxRemoteEpWidth) = @_;
+   my($groupBy,$direction,$maxLocalEpWidth,$maxRemoteEpWidth) = @_;
    my $arrowMap  = { outbound => "-->", inbound => "<--" };
    my $arrow     = $$arrowMap{$direction};
    my $maxLocal  = $maxLocalEpWidth  + 1;
@@ -828,8 +979,8 @@ sub printDistantConnections {
          $dnsName = ''
       }
       else {
-         if (length($dnsName) > $dnsNameLen) {
-            $dnsName = '...' . substr($dnsName, -($dnsNameLen-3))
+         if (length($dnsName) > $dnsnamelen) {
+            $dnsName = '...' . substr($dnsName, -($dnsnamelen-3))
          }
       }
       my $stateText = buildStateText($$gDesc{stateSubHash});
@@ -837,9 +988,9 @@ sub printDistantConnections {
    }
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Printer for "looping" connections
-# -----------------------------------------------------------------------------
+# ===
 
 sub printLoopingConnections {
    my($groupBy,$maxLocalEpWidth,$maxRemoteEpWidth) = @_;
@@ -858,9 +1009,9 @@ sub printLoopingConnections {
    }
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Build state text
-# -----------------------------------------------------------------------------
+# ===
 
 sub buildStateText {
    my($stateSubHash) = @_;
@@ -873,21 +1024,21 @@ sub buildStateText {
    return $text 
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Build format string
-# -----------------------------------------------------------------------------
+# ===
 
 sub buildFormatString {
    my($maxLocalEpWidth,$maxRemoteEpWidth) = @_;
    my $maxLocal  = $maxLocalEpWidth  + 1;
    my $maxRemote = $maxRemoteEpWidth + 1;
-   my $format    = "   %-${maxLocal}s %3s %-${maxRemote}s : %4d        %-${dnsNameLen}s %s\n";
+   my $format    = "   %-${maxLocal}s %3s %-${maxRemote}s : %4d        %-${dnsnamelen}s %s\n";
    return $format
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Sorter of values in "groupBy" hashes
-# -----------------------------------------------------------------------------
+# ===
 
 sub sortByCountThenKey {
    my $a_c = $$a{count};
@@ -900,9 +1051,9 @@ sub sortByCountThenKey {
    }
 }
 
-# ----------------------------------------------------------------------------
+# ===
 # Sort TCP state strings, the ones mostly seen have negative sort values
-# ----------------------------------------------------------------------------
+# ===
 
 sub sortByState {
    # sortedStateStrings is not visible to sortByState() if in the global context...
@@ -923,10 +1074,10 @@ sub sortByState {
    return $a_x <=> $b_x
 }
 
-# -----------------------------------------------------------------------------
+# ===
 # Obtain local interfaces as a set mapping "IP address" --> 1; this includes
 # the loopback address
-# -----------------------------------------------------------------------------
+# ===
 
 sub obtainLocalIpAddresses {
    my $res = {}; # map which maps an IP string representation to a Net::IP object
@@ -943,7 +1094,8 @@ sub obtainLocalIpAddresses {
             die "Could not transform the address " . $if->address . " of interface '$if' into a Net::IP\n" unless $ip;
             $$res{$ip->ip} = $ip;
             if ($debug) { 
-               print STDERR sprintf("Interface %-7s with address %-20s registered with IPv4 address string %s\n", "'" . $if . "'" , "'" . $if->address . "'", "'" . $ip->ip . "'");
+               print STDERR sprintf("Interface '%-7s' with address '%-20s' registered with IPv4 address string '%s'\n",
+                                    $if,$if->address,$ip->ip);
             }
          }
       }
@@ -961,14 +1113,14 @@ sub obtainLocalIpAddresses {
             my $rawIp = "$1:$2:$3:$4:$5:$6:$7:$8";
             my $if    = $13;
             my $ip = new Net::IP($rawIp); 
-            die "Could not transform the address " . $rawIp . " of interface '$if' into a Net::IP\n" unless $ip;
+            die "Could not transform the address '$rawIp' of interface '$if' into a Net::IP\n" unless $ip;
             $$res{$ip->ip} = $ip;
             if ($debug) { 
-               print STDERR sprintf("Interface %-7s registered with IPv6 address string %s\n", "'" . $if . "'" , "'" . $ip->ip . "'");
+               print STDERR sprintf("Interface '%-7s' registered with IPv6 address string '%s'\n", $if, $ip->ip);
             }
          }
       }
    }
-   return $res;
+   return $res
 }
 

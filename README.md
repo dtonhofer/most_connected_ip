@@ -1,32 +1,47 @@
 most_connected_ip
 =================
 
+## Status
+
+- Maintained. Works on Fedora 28.
+
+## What is it
+
 This is a Perl script to display the <em>currently active TCP connections</em> and their TCP
 state on the local machine, grouped by endpoint (IP:port), with any remote IP address resolved 
 to its reverse DNS name, if possible. 
 
 This is done by scanning the `netstat(8)` output, the script is thus meant for a Unix.
 
-It is best used with `watch(1)` for continuous updates. You also need a wide screen (or a small font).
-
 For example, run it using:
 
-    watch -n 1 "perl most_connected_ip.pl 2>/dev/null"
+    perl most_connected_ip.pl --loop=5 --dnsnamelen=5
 
-The above suppresses error messages and makes "watch" run the script every second. Of course a simple
+Output will be produced every 5 seconds, with the column showing the result of reverse-lookup
+DNS 80 characters wide. 
 
-    watch most_connected_ip.pl 
+The following can be passed:
 
-should work too.
-   
-Problems
---------
+    --debug         To activate debugging output.
+    --nodns         To disable reverse DNS lookup; just IP addresses will be printed.
+    --notiming      Do not insert time taken for DNS lookups in output.
+                    (note that timing is printed only on lookup; if there is a cache
+                    hit on the program cache, no timing information will be printed in any case)
+    --debugdns      Print time taken for DNS lookup to STDERR; useful when debugging DNS problems.
+                    (you may also want to wield this: 'tcpdump -i lo udp port 53')
+    --dnsnamelen=N  Size of column holding the DNS lookup result (default 50; at least 30).
+    --loop[=N]      The program will loop every N seconds, forever, instead of running once only.
+                    (N can be missing (default is 1) or else 1..3600)
+
+## Problems
 
 Short-lived connections that a created and disappear before they can appear in the next `netstat` listing are invisible.
 For that, only something based on `tcpdump(8)` helps.
 
-Similar programs
-----------------
+The program may appear slow if `/etc/resolv.conf` does not explicitly say `nameserver 127.0.0.1`, causing
+DNS resolution to issue a IPv6 request which times out.
+
+## Similar programs
 
    - [tcptrack](http://linux.die.net/man/1/tcptrack) - That's basically it. No longer available at its old Christmas Island address, but you can just `yum install tcptrack`.
    - [nnetstat.pl](http://www.muenster.de/~alnep/linux/Nnetstat/) - Perl/Gtk version of netstat.
@@ -34,13 +49,7 @@ Similar programs
    - For Microsoft Windows, there is [tcpview](http://technet.microsoft.com/en-us/sysinternals/bb897437.aspx)
    - [nethogs](http://nethogs.sourceforge.net/) - NetHogs is a small 'net top' tool, grouping bandwidth by process.
 
-Tested on
----------
-
-Fedora 17/18, Red Hat Linux 6, Red Hat Linux 5
-
-Sample output
--------------
+## Sample output
 
 Below is a sample output that shows two "inbound" TCP connections to ports 777 and 443 (one line for
 each), three "outbound" TCP connections to some remote machines on ports 777 and 25 (the first two
@@ -71,8 +80,7 @@ lines have been ignored in this case.
         127.0.0.1                      --> 127.0.0.1:3351      :    1                                              1 x ESTABLISHED
         127.0.0.1                      --> 127.0.0.1:32000     :    1                                              1 x ESTABLISHED
 
-License
--------
+## License
 
 Copyright 2012<br>
 M-PLIFY S.A.<br>
@@ -91,8 +99,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Change log
-----------
+## Change log
 
 <table>
 <tr>
@@ -120,16 +127,16 @@ Netstat output parsing went wrong on Ubuntu (the IPv6 loopback is apparently sho
 <td>
 When running teamviewer client, connections that are localhost->localhost show up that may have: No corresponding server socket; May only go "one way", i.e. the second entry of the typical bidirectional TCP connection is missing. How is that possible? ...the script could not handle that. FIXED! Also: Net::IP 1.25 declares that an IP address on 127.0.0.1 is "PRIVATE", not on the "LOOPBACK". This is weird, and is now being forcefully "fixed". Maybe this will go away im later versions!
 </td>
+<tr>
+<td>2018-10-27</td>
+<td>Complete review; added options and made it possible to have the program loop instead of having to use `watch`</td>
 </table>
 
-TODO
-----
+## TODO
 
 <table>
 <tr>
-<td>When the reverse DNS lookup fails, one should traceroute to find the last IP that reverse-resolves. Mite be
-cool, but this means that the "watch looping" has to be done by the script itself as one wants to remember the
-last traceroute results, which may have taken a LONG time.</td>
+<td>When the reverse DNS lookup fails, one should traceroute to find the last IP that reverse-resolves.
 </tr>
 <tr>
 <td>Also list the process owning the connection; info about this can be obtained with `lsof(8)`</td>
