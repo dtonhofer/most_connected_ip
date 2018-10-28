@@ -3,7 +3,7 @@ most_connected_ip
 
 ## Status
 
-- Maintained. Works on Fedora 28.
+- Maintained. Works on Fedora 28 on 2018-10-28.
 
 ## What is it
 
@@ -47,7 +47,7 @@ DNS resolution to issue a IPv6 request which times out.
    - [nnetstat.pl](http://www.muenster.de/~alnep/linux/Nnetstat/) - Perl/Gtk version of netstat.
    - [Wireshark](http://www.wireshark.org/) - Wireshark (ex Ethereal), which is the dog's bollocks
    - For Microsoft Windows, there is [tcpview](http://technet.microsoft.com/en-us/sysinternals/bb897437.aspx)
-   - [nethogs](http://nethogs.sourceforge.net/) - NetHogs is a small 'net top' tool, grouping bandwidth by process.
+   - [nethogs](https://github.com/raboof/nethogs#readme) - NetHogs is a small 'net top' tool, grouping bandwidth by process.
 
 ## Sample output
 
